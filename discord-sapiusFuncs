@@ -1,0 +1,171 @@
+// Função para gerar um hash único para o contexto
+function generateContextHash(context) {
+    const contextString = JSON.stringify(context); // Converter o contexto em string
+    return crypto.createHash('sha256').update(contextString).digest('hex'); // Gerar o hash
+}
+
+// Função para obter uma resposta da OpenAI usando o contexto dinâmico (histórico de conversa)
+async function getOpenAIResponse(channelId, message, newMessage) {
+    try {
+        console.log("--- NOVA INTERAÇÃO ---");
+        console.log("Channel ID:", channelId);
+        //Verifica se "Sapius" está na mensagem antes de processá-la
+        if (!newMessage.toLowerCase().includes("sapius")) {
+            console.log("Mensagem não contém 'Sapius', não processando.");
+            return; // Ignorar mensagens que não mencionam "Sapius"
+        }
+        if (newMessage.toLowerCase().startsWith("gera uma imagem de") || newMessage.toLowerCase().startsWith("cria uma imagem de")) {
+            const prompt = newMessage.replace(/(gera|cria) uma imagem de /i, "").trim();
+            console.log("Gerando imagem com prompt:", prompt);
+            await generateImage(prompt, message);
+            return; // Evita que continue para o GPT De texto
+        }
+        let channelContext = channelContexts[channelId] || [];
+        const currentContextHash = generateContextHash(channelContext); // Gerar o hash do contexto atual
+        console.log("Context Before Update:", channelContext);
+
+        const filteredMessage = filterNoise(newMessage);
+
+        const newContext = [...channelContext];
+        if (filteredMessage) {
+            // Verificar se a mensagem não é redundante   
+         const isDuplicate = newContext.some(msg => msg.content === filteredMessage);
+            if (!isDuplicate) {
+                newContext.push({ author: message.author.username, content: filteredMessage, timestamp: Date.now() });
+            }
+        }
+
+        const updatedContextHash = generateContextHash(newContext); // Gerar o hash do contexto após a atualização
+        console.log("Context After Update:", newContext);
+
+        // 2. Verificar se o contexto foi realmente alterado
+        if (currentContextHash === updatedContextHash) {
+            console.log("Contexto não alterado, não será enviado para a API.");
+            return; // Se o contexto não mudou, não envia para a API
+        }
+
+        console.log("Contexto alterado, enviando para a API.");
+        console.log("Context After Update:", updatedContextHash);
+        console.log("Context After Update:", channelContext);
+
+        const weightedContext = weightRecentMessages(channelContext);
+        const conversationPrompt = [
+            { role: 'system', content: "Mantenha o contexto da conversa e responda no idioma utilizado pelo usuário." },
+            { role: 'system', content: "--- INÍCIO DOS PROMPTS ---" },
+            // Adicione aqui todos os seus prompts do sistema
+            { role: 'system', content: "Adapte seu nível de detalhe à complexidade da pergunta." },
+            { role: 'system', content: "Use exemplos práticos para ilustrar conceitos." },
+            // ... (outros prompts)
+            { role: 'system', content: "--- FIM DOS PROMPTS ---" },
+            ...weightedContext.map(msg => ({ role: msg.author === message.author.username ? 'user' : 'assistant', content: msg.content })),
+        ];
+
+        console.log("Prompt enviado para a API:", conversationPrompt);
+
+        const response = await axios.post(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                model: 'gpt-3.5-turbo',
+                messages: conversationPrompt,
+                max_tokens: 500,
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${OPEN_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        const responseText = response.data.choices[0].message.content;
+        console.log("Texto da resposta gerada:", responseText);
+        if (!responseText || responseText.trim() === '') {
+            console.log("Empty response, not sending a message.");
+            await sendLongMessage(message, 'Sorry, I couldn\'t generate a response. Try again later.');
+        } else {
+            await sendLongMessage(message, responseText);
+        }
+        // Atualizar o contexto guardado
+        channelContexts[channelId] = channelContext;
+        console.log(channelContexts);
+    } catch (error) {
+        console.error('Error calling the OpenAI API:', error);
+        await sendLongMessage(message, 'I\'m overwhelmed! Try again later.');
+    }
+}
+// Função para gerar um resumo do contexto
+async function summarizeContext(messages) {
+    try {
+        const prompt = `Summarize the following conversation:\n\n${messages.map(msg => `${msg.author}: ${msg.content}`).join('\n')}\n\nSummary:`;
+        const response = await axios.post(
+            'https://api.openai.com/v1/completions',
+            {
+                model: 'text-davinci-003',
+                prompt: prompt,
+                max_tokens: 150,
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${OPEN_API_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        const summary = response.data.choices[0].text.trim();
+
+        return [{ author: 'System', content: `Summary: ${summary}`, timestamp: Date.now() }];
+    } catch (error) {
+        console.error("Error summarizing context:", error);
+        return messages.slice(-1);
+    }
+}
+
+// Função para pesar as mensagens mais recentes
+function weightRecentMessages(messages) {
+    const now = Date.now();
+    return messages.map((msg, index) => {
+        const weight = Math.exp(-(now - msg.timestamp) / (CONTEXT_TIMEOUT / 3));
+        return { ...msg, weight: weight * 2 };
+    }).sort((a, b) => b.weight - a.weight);
+}
+
+// Função para filtrar "ruídos" no texto
+function filterNoise(message) {
+    if (message.trim().length === 0 || /^<@&\d+>/.test(message) || /^<@\d+>/.test(message) || /^https?:\/\/\S+$/.test(message) || /^:(\w+):$/.test(message)) {
+        return null; // Ignora mensagens com menções, links, emojis ou vazias
+    }
+    return message;
+}
+
+
+
+
+// Evento `messageCreate`
+client.on('messageCreate', async (message) => {
+    try {
+        if (message.system || message.author.id === client.user.id || processedMessages.has(message.id)) {
+            return;
+        }
+
+        processedMessages.add(message.id);
+
+        const channelId = message.channel.id;
+        const userMessage = message.content;
+
+        if (userMessage.trim().length > 0) {
+            await message.channel.sendTyping();
+            await getOpenAIResponse(channelId, message, userMessage);
+        }
+    } catch (error) {
+        console.error("Error in messageCreate event:", error);
+    }
+});
+
+
+
+
+
+
+
+
+
+
