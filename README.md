@@ -42,7 +42,7 @@ Evitar Sobrescrita do Contexto:
 
 Criar uma variável separada para armazenar o contexto atualizado antes de atribuí-lo à variável global.
 
-//////////////////////////////--------------------------------------------------------- funcs ......... etc ------------------------- //////////////////////////////////////////////
+///////////////////------------------ funcs ......... etc ------------------///////////////////////////////
 
 
 // Função para gerar um hash único para o contexto
@@ -216,8 +216,7 @@ client.on('messageCreate', async (message) => {
 
 
 
-/////////////////////////////////////////////////--------------------------Logs Relevantes-------------------------------///////////////////////////////////////////////
-
+////////--------Logs Relevantes-------------------////////////
 
 
 
